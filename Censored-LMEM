@@ -1,0 +1,144 @@
+#----------SIMULATION CODES FOR LMELM basis PS with KMW and kNN IMPUTATION-----------------
+#kNN imputation function-------------------------------------------------------------------
+knnimp<-function(x,y,K,delta){
+  library(pracma)
+  dist<-NA
+  index<-NA
+  knny<-NA
+  y2<-NA
+  t2<-0
+  a<-NA
+  n<-length(y)
+  
+  say<-0
+  for (i2 in 1:n) {
+    if (delta[i2]==0){
+      for (j in 1:n){
+        dist[j]<-(y[i2]-y[j])^2
+        index[j]<-j
+        if (dist[j]==0){
+          dist[j]<-NA
+          index[j]<-NA
+        }
+      }
+      say<-say+1
+      dist<- dist[!is.na(dist)]
+      index<- index[!is.na(index)]
+      disted<-matrix(c(index,dist),length(index),2)
+      sdist<-sortrows(disted,k=2)
+      for (t in 1:length(dist)){
+        a[t]<-sdist[t,1]
+        
+      }
+      for (j2 in 1:length(a)){
+        if (is.na(y[a[j2]])){
+          a[j2]<-NA
+        }
+      }
+      a<- a[!is.na(a)]
+      for (t2 in 1:K){
+        knny[t2]<-y[a[t2]]
+      }
+      y2[i2]<-mean(knny)+std(y)
+    }
+    
+  }
+  for (h in 1:n){
+    if (delta[h]==0){
+      y[h]<-y2[h]
+    }
+  }
+  return(y)
+}
+#-------------------------------------------------------------------------------------
+library(svMisc)
+n <-30                                     #Sample size
+sim <- 50                                #Number of simulation study
+rmse_kmw <- 0
+rmse_knn <- 0
+kmw_yhat <- matrix(0,n,sim)
+knn_yhat <- matrix(0,n,sim)
+var_kmw  <- matrix(0,7,sim)
+var_knn  <- matrix(0,7,sim)
+#DATA GENERATION----------------------------------------------------------------------
+for (s in 1:sim){
+T<-0
+CL<-0.40                                   #Censoring level
+x<-(seq(-1,3.2,length.out=n))              #Sequentially produced Predictor x
+f<- -0.1812-0.3221*x+4*sin(x^2)+exp(x)     #f function
+e<-(rnorm(n))                             #error terms
+y<-f+e+5                                  #fully observed responses
+delta<-1-rbinom(n,1,CL)                    #Censoring indicator
+c<-rnorm(n,mean(y),sd(y))                  #censoring variable
+#Obtaining Right-censored responses T(i)s---------------------------------------------
+for (i in 1:n){
+  if (delta[i]==0){
+    T[i]<-min(y[i],c[i])
+  }
+    else{
+    T[i]<-y[i]
+  }
+}
+#-------------------------------------------------------------------------------------
+#Calculation of the Kaplan-Meier weights----------------------------------------------
+library("jackknifeKME")
+kmweights<-kmweight(T,delta)             #Calculate km weight as a vector
+KMW<-diag(kmweights)                     #Tranforms weights to a diagonal matrix
+#-------------------------------------------------------------------------------------
+#Imputed resposne variable via kNN imputation-----------------------------------------
+yknn<-knnimp(x,T,10,delta)
+#-------------------------------------------------------------------------------------
+#ESTIMATION PROCEDURE-----------------------------------------------------------------
+library(mgcv)
+library(splines)
+RE<-bs(x, df = NULL, knots = NULL, degree = 3, intercept = FALSE,Boundary.knots = range(x))  #Random effect covariates
+#Selection of smoothing parameter-----------------
+aicckmw <- 0
+aiccknn <- 0
+p=3
+q=3
+sp<-seq(0.0000001,0.001,length.out = n/2)
+for (j in 1:(n/2)){
+pfit_kmw <- gam(T ~ t2(x,bs="ps",m=3,sp=sp[j])+t2(RE,bs="ps",sp=sp[j]),knots=list(seq(min(x),max(x),length=n/2)),weights=kmweights)
+pfit_knn <- gam(yknn ~ t2(x,bs="ps",m=3,sp=sp[j])+t2(RE,bs="ps",sp=sp[j]),knots=list(seq(min(x),max(x),length=n/2)))
+aicckmw[j]<-log10(sum((y-pfit_kmw$fitted.values)^2)/n)+(2*(p+q+1)+1)/(n-(p+q+1)-2)
+aiccknn[j]<-log10(sum((y-pfit_knn$fitted.values)^2)/n)+(2*(p+q+1)+1)/(n-(p+q+1)-2)
+}
+for (j2 in 1:(n/2)){
+  if (aicckmw[j2]==min(aicckmw)){
+    spkmw<-sp[j2]
+  }
+  if (aiccknn[j2]==min(aiccknn)){
+    spknn<-sp[j2]
+  }
+}
+#-------------------------------------------------
+fit_kmw <- gam(T ~ t2(x,bs="ps",m=3,sp=spkmw)+t2(RE,bs="ps",sp=spkmw),knots=list(seq(min(x),max(x),length=n/2)),weights=kmweights)
+fit_knn <- gam(yknn ~ t2(x,bs="ps",m=3,sp=spknn)+t2(RE,bs="ps",sp=spknn),knots=list(seq(min(x),max(x),length=n/2)))
+#Fitted values for RMSE-------------
+kmw_yhat[,s] <- fit_kmw$fitted.values
+knn_yhat[,s] <- fit_knn$fitted.values
+#Covariance Matrices of coefficients 
+sum_kmw<-summary(fit_kmw)
+sum_knn<-summary(fit_knn)
+
+var_coef_kmw<-diag(sum_kmw$cov.unscaled)     #Variances of coefficients both fixed and random effects kMW
+var_coef_knn<-diag(sum_knn$cov.unscaled)     #Variances of coefficients both fixed and random effects kNN
+var_kmw[,s]<-c(var_coef_kmw[1:4],var_coef_kmw[6:8])
+var_knn[,s]<-c(var_coef_knn[1:4],var_coef_knn[6:8])
+
+rmse_kmw[s]<-sqrt(mean((y-kmw_yhat)^2))         #RMSE for KMW
+rmse_knn[s]<-sqrt(mean((y-knn_yhat)^2))         #RMSE for kNN imp.
+
+pn<-(s/sim)*100
+if (s==sim){
+  cat("Done!\n")
+}
+else{
+progress(pn)
+}
+Sys.sleep(0.01)
+}
+#-------------------------------------------------------------------------------------
+
+
